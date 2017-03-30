@@ -47,7 +47,9 @@ void		masstree_gc(masstree_t *, void *);
 size_t		masstree_maxheight(void);
 
 void *		masstree_get(masstree_t *, const void *, size_t);
+void		masstree_get_first(masstree_t *, void **, size_t *);
 bool		masstree_put(masstree_t *, const void *, size_t, void *);
+bool		masstree_insert(masstree_t *, const void *, size_t, void *);
 bool		masstree_del(masstree_t *, const void *, size_t);
 
 __END_DECLS

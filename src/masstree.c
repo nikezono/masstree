@@ -1259,6 +1259,7 @@ forward:
 	return leaf;
 }
 
+
 /*
  * masstree_get: fetch a value given the key.
  */
@@ -1396,6 +1397,169 @@ newlayer:
 	}
 	return true;
 }
+
+/*
+ * masstree_insert: store a value if not exist.
+ *
+ * => Returns true if the new entry was created.
+ * => Returns false if the existing entry was exist.
+ */
+bool
+masstree_insert(masstree_t *tree, const void *key, size_t len, void *val)
+{
+	mtree_node_t *root = tree->root, *node;
+	unsigned l = 0, slen, idx, type;
+	mtree_leaf_t *leaf;
+	void *sval = val;
+	uint64_t skey;
+advance:
+	skey = fetch_word64(key, len, &l, &slen);
+
+	/* Lookup the leaf and lock it (returns stable version). */
+	leaf = find_leaf_locked(root, skey, slen);
+	if (__predict_false(leaf == NULL)) {
+		root = tree->root, l = 0;
+		goto advance;
+	}
+	idx = leaf_find_lv(leaf, skey, slen, &type);
+	node = (mtree_node_t *)leaf;
+	NOSMP_ASSERT(!leaf->parent || validate_inode(leaf->parent));
+
+	if (type == MTREE_VALUE) {
+		/* The key was found: store a new value. */
+		/* leaf->lv[idx] = val; */
+		unlock_node(node);
+		return false;
+	}
+	if (type == MTREE_LAYER) {
+		/*
+		 * Continue to the next layer.  Fixup the pointer to
+		 * point to the real root, if necessary.
+		 */
+		root = leaf->lv[idx];
+		if ((root->version & NODE_ISROOT) == 0) {
+			root = leaf->lv[idx] = walk_to_root(root);
+		}
+		unlock_node(node);
+		goto advance;
+	}
+
+	/* Note: cannot be MTREE_UNSTABLE as we acquired the lock. */
+	ASSERT(type == MTREE_NOTFOUND);
+newlayer:
+	ASSERT(node_locked_p(node));
+
+	/* Create a new layer. */
+	if (slen & MTREE_LAYER) {
+		mtree_leaf_t *nlayer;
+
+		nlayer = leaf_create(tree);
+		nlayer->version |= NODE_LOCKED | NODE_INSERTING | NODE_ISROOT;
+		atomic_thread_fence(memory_order_release);
+		root = sval = nlayer;
+	}
+
+	/* The key was not found: insert it. */
+	if (!leaf_insert_key(node, skey, slen, sval)) {
+		/* The node is full: perform the split processing. */
+		split_leaf_node(tree, node, skey, slen, sval);
+	} else {
+		unlock_node(node);
+	}
+
+	if (slen & MTREE_LAYER) {
+		/* Advance the key and jump into the next layer. */
+		skey = fetch_word64(key, len, &l, &slen);
+		sval = val, node = root;
+		goto newlayer;
+	}
+	return true;
+}
+
+/*
+ * masstree_get_first: fetch a first key
+ */
+void
+masstree_get_first(masstree_t *tree, void** key, size_t* len)
+{
+	mtree_node_t *root = tree->root;
+	unsigned l = 0, slen, idx, type;
+	mtree_leaf_t *leaf;
+	uint64_t skey;
+	uint32_t v;
+	void *lv;
+
+  *key = tree->ops->alloc(8);
+  *len = 0;
+
+advance:
+	/*
+   * @TODO: NOTE
+	 */
+	skey = 0;
+  slen = 1;
+retry:
+	/* Find the leaf given the slice-key. */
+	leaf = find_leaf(root, skey, &v);
+forward:
+	if (__predict_false(v & NODE_DELETED)) {
+		/* Collided with deletion - try again from the root. */
+		goto retry;
+	}
+
+  size_t nkeys = PERM_NKEYS(leaf->permutation);
+  /* assert(0 < nkeys); */
+  if (nkeys == 0){
+    tree->ops->free(*key, *len);
+    *key = NULL;
+    *len = 0;
+    return;
+  }
+  size_t min_idx = PERM_KEYIDX(leaf->permutation, 0);
+
+	uint64_t key_slice = leaf->keyslice[min_idx];
+  uint64_t host_keyslice = be64toh(key_slice);
+	uint64_t info = leaf->keyinfo[min_idx];
+  type = KEY_TYPE(info);
+
+
+	atomic_thread_fence(memory_order_acquire);
+
+	/* Check that the version has not changed. */
+	if (__predict_false((leaf->version ^ v) > NODE_LOCKED)) {
+		leaf = walk_leaves(leaf, skey, slen, &v);
+		goto forward;
+	}
+
+	if (__predict_true(type == MTREE_LAYER) && KEY_LLEN(info) == 8) {
+		/* Advance the key and move to the next layer. */
+		ASSERT((slen & MTREE_LAYER) != 0);
+    *key = realloc(*key, *len+8); // @FIXME: dont use realloc. use ops
+    memcpy(&((*key)[*len]), &host_keyslice, 8);
+    *len += 8;
+
+		root = lv;
+		goto advance;
+	}
+
+  memcpy(&((*key)[*len]), &host_keyslice, KEY_LLEN(info));
+  *len += KEY_LLEN(info);
+  return;
+
+#if 0
+	if (__predict_false((type & ~MTREE_LAYER) == MTREE_UNSTABLE)) {
+		/*
+		 * The value is about to become MTREE_LAYER, unless remove
+		 * races and wins, therefore we have to re-check the key.
+		 */
+		goto forward;
+	}
+#endif
+	return;
+}
+
+
+
 
 /*
  * masstree_del: remove they entry given the key.

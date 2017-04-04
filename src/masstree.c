@@ -88,6 +88,10 @@
  *   protected by the lock of the nodes they are pointing to.
  */
 
+// for BSD Kernel: endian.h
+#define _DEFAULT_SOURCE_
+#define _BSD_SOURCE 
+
 #if defined(_KERNEL) || defined(_STANDALONE)
 #include <sys/cdefs.h>
 #include <sys/param.h>
@@ -100,6 +104,7 @@
 #include <string.h>
 #include <limits.h>
 #include <assert.h>
+#include <endian.h>
 #endif
 
 #include "utils.h"
@@ -1535,14 +1540,16 @@ forward:
 		/* Advance the key and move to the next layer. */
 		ASSERT((slen & MTREE_LAYER) != 0);
     *key = realloc(*key, *len+8); // @FIXME: dont use realloc. use ops
-    memcpy(&((*key)[*len]), &host_keyslice, 8);
+    char* key_c = (char*)*key;
+    memcpy(&((key_c)[*len]), &host_keyslice, 8);
     *len += 8;
 
 		root = lv;
 		goto advance;
 	}
 
-  memcpy(&((*key)[*len]), &host_keyslice, KEY_LLEN(info));
+  char* key_c = (char*)*key;
+  memcpy(&((key_c)[*len]), &host_keyslice, KEY_LLEN(info));
   *len += KEY_LLEN(info);
   return;
 
